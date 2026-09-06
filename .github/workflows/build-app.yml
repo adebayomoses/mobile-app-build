@@ -1,0 +1,111 @@
+name: Build Android app for Esipher
+
+# Builds the Capacitor WebView wrapper Esipher generated into this repo.
+# Runs on every push (Esipher pushes here when you change the app's
+# settings) and can be re-run by hand from the Actions tab.
+#
+# Produces two files, uploaded together as the "esipher-app" artifact:
+#   - app-debug.apk   — install straight onto a device for testing
+#                       (Android Settings > "install unknown apps").
+#   - app-release.aab  — signed with your keystore; upload this to the
+#                        Google Play Console.
+#
+# The signing keystore and its password arrive as repo secrets that
+# Esipher set for you: ESIPHER_KEYSTORE_BASE64, ESIPHER_KEYSTORE_PASSWORD,
+# ESIPHER_KEY_ALIAS.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Add the Android platform
+        run: npx --yes cap add android
+
+      - name: Generate launcher icons and splash screens
+        run: npx --yes capacitor-assets generate --android
+
+      - name: Copy web assets into the Android project
+        run: npx --yes cap sync android
+
+      - name: Restore signing keystore
+        run: |
+          if [ -z "${ESIPHER_KEYSTORE_BASE64}" ]; then
+            echo "::error::ESIPHER_KEYSTORE_BASE64 secret is missing — re-run 'Generate & build app' in Esipher so it can set the signing secrets."
+            exit 1
+          fi
+          echo "${ESIPHER_KEYSTORE_BASE64}" | base64 -d > android/app/release.p12
+        env:
+          ESIPHER_KEYSTORE_BASE64: ${{ secrets.ESIPHER_KEYSTORE_BASE64 }}
+
+      - name: Wire the keystore into Gradle
+        run: |
+          cat >> android/app/build.gradle <<'GRADLE'
+
+          // --- added by Esipher: release signing ---
+          android {
+              signingConfigs {
+                  esipherRelease {
+                      storeFile file("release.p12")
+                      storePassword System.getenv("ESIPHER_KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("ESIPHER_KEY_ALIAS")
+                      keyPassword System.getenv("ESIPHER_KEYSTORE_PASSWORD")
+                      storeType "PKCS12"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.esipherRelease
+                  }
+              }
+          }
+          GRADLE
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon assembleDebug
+        working-directory: android
+
+      - name: Build signed release bundle
+        run: ./gradlew --no-daemon bundleRelease
+        working-directory: android
+        env:
+          ESIPHER_KEYSTORE_PASSWORD: ${{ secrets.ESIPHER_KEYSTORE_PASSWORD }}
+          ESIPHER_KEY_ALIAS: ${{ secrets.ESIPHER_KEY_ALIAS }}
+
+      - name: Collect outputs
+        run: |
+          mkdir -p _out
+          cp android/app/build/outputs/apk/debug/app-debug.apk _out/app-debug.apk
+          cp android/app/build/outputs/bundle/release/app-release.aab _out/app-release.aab
+          ls -la _out
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esipher-app
+          path: _out
+          if-no-files-found: error
