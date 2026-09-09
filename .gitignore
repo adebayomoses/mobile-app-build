@@ -2,4 +2,5 @@ node_modules/
 android/
 ios/
 _out/
+_out_ios/
 *.log
